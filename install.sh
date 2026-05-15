@@ -5,17 +5,24 @@
 #   sudo bash install.sh
 #
 # It will:
-#   1. Install system deps (Node 20, Python 3.11, MongoDB 7, nginx, yarn)
+#   1. Install system deps (Node 20, Python 3, MongoDB 7, nginx, yarn, certbot)
 #   2. Clone (or use current dir) the repo to /opt/emergent-clone
-#   3. Ask interactively for: domain / public URL, admin account, Mongo URL,
-#      Emergent LLM key, Stripe keys (optional), JWT secret
+#   3. Ask interactively for: public URL, admin email/name/password,
+#      MongoDB URL + DB name, Stripe keys (optional, settable later in admin),
+#      JWT secret (auto if blank)
 #   4. Write backend/.env and frontend/.env
-#   5. Install backend deps (uv-/pip), frontend deps (yarn), build frontend
-#   6. Bootstrap the admin user (also a normal user — same login can build apps)
-#   7. Create systemd unit `emergent-backend` + nginx vhost serving frontend
-#   8. Reload services and print final access URLs
+#      (Emergent LLM key + Stripe mode = "live" are pre-filled automatically)
+#   5. Install backend deps in a venv, frontend deps + production build
+#   6. Bootstrap the admin user (also a normal user)
+#   7. Create systemd unit `emergent-backend` + nginx vhost
+#   8. If the public URL is https://, auto-run certbot to obtain a TLS cert
+#   9. Reload services and print final access URLs
 #
 set -euo pipefail
+
+# ---------- hard-coded defaults the user asked for ----------
+EMERGENT_LLM_KEY_DEFAULT="sk-emergent-61d743b80527fC5Cd7"
+STRIPE_MODE_DEFAULT="live"
 
 # ---------- helpers ----------
 BLUE='\033[1;34m'; GREEN='\033[1;32m'; YELLOW='\033[1;33m'; RED='\033[1;31m'; NC='\033[0m'
@@ -26,7 +33,14 @@ err()  { echo -e "${RED}\xE2\x9C\x97${NC} $*" >&2; exit 1; }
 ask()  { local p="$1" def="${2-}"; local v
         if [[ -n "$def" ]]; then read -r -p "$p [$def]: " v; echo "${v:-$def}";
         else read -r -p "$p: " v; echo "$v"; fi; }
-ask_secret() { local p="$1" v; read -r -s -p "$p: " v; echo; echo "$v"; }
+ask_secret() {
+  local p="$1" v=""
+  while [[ -z "$v" ]]; do
+    read -r -s -p "$p: " v; echo
+    [[ -z "$v" ]] && warn "Cannot be empty, try again."
+  done
+  echo "$v"
+}
 
 [[ $EUID -eq 0 ]] || err "Run with sudo / as root."
 
@@ -37,8 +51,9 @@ echo
 
 REPO_URL=$(ask "Git repo URL to clone from (leave blank if running from inside repo)" "")
 INSTALL_DIR=$(ask "Install directory" "/opt/emergent-clone")
-PUBLIC_URL=$(ask "Public URL (e.g. https://app.example.com)" "http://$(hostname -I | awk '{print $1}')")
-ADMIN_EMAIL=$(ask "Admin email" "admin@$(hostname -d 2>/dev/null || echo example.com)")
+SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+PUBLIC_URL=$(ask "Public URL (e.g. https://app.example.com)" "http://${SERVER_IP:-localhost}")
+ADMIN_EMAIL=$(ask "Admin email")
 ADMIN_NAME=$(ask "Admin display name" "Admin")
 ADMIN_PASSWORD=$(ask_secret "Admin password (min 6 chars)")
 [[ ${#ADMIN_PASSWORD} -ge 6 ]] || err "Admin password too short."
@@ -46,59 +61,81 @@ ADMIN_PASSWORD=$(ask_secret "Admin password (min 6 chars)")
 MONGO_URL=$(ask "MongoDB connection URL" "mongodb://localhost:27017")
 DB_NAME=$(ask "MongoDB database name" "emergent_clone")
 
-EMERGENT_LLM_KEY=$(ask "Emergent LLM key (needed for AI builder)" "")
-[[ -n "$EMERGENT_LLM_KEY" ]] || warn "No LLM key set — AI builder will use a fallback response."
-
-STRIPE_API_KEY=$(ask "Stripe secret key (sk_test_... or sk_live_...) — can be set later in Admin panel" "")
-STRIPE_PUBLISHABLE_KEY=$(ask "Stripe publishable key (pk_test_... or pk_live_...)" "")
-STRIPE_MODE=$(ask "Stripe mode" "test")
+STRIPE_API_KEY=$(ask "Stripe secret key (sk_test_/sk_live_) — leave blank to set later in Admin panel" "")
+STRIPE_PUBLISHABLE_KEY=$(ask "Stripe publishable key (pk_test_/pk_live_)" "")
 
 JWT_SECRET=$(ask "JWT secret (leave blank to auto-generate)" "")
-[[ -z "$JWT_SECRET" ]] && JWT_SECRET=$(openssl rand -hex 32)
+[[ -z "$JWT_SECRET" ]] && JWT_SECRET=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p -c 64)
 
 CORS_ORIGINS=$(ask "Comma-separated CORS origins" "$PUBLIC_URL,*")
 
+# Derived
+DOMAIN=$(echo "$PUBLIC_URL" | sed -E 's#https?://##' | cut -d/ -f1 | cut -d: -f1)
+IS_HTTPS=0
+[[ "$PUBLIC_URL" == https://* ]] && IS_HTTPS=1
+IS_IP=0
+[[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && IS_IP=1
+
 echo
 log "Summary:"
-echo "  Install dir:    $INSTALL_DIR"
-echo "  Public URL:     $PUBLIC_URL"
-echo "  Admin email:    $ADMIN_EMAIL"
-echo "  MongoDB:        $MONGO_URL ($DB_NAME)"
-echo "  Stripe mode:    $STRIPE_MODE"
+echo "  Install dir:        $INSTALL_DIR"
+echo "  Public URL:         $PUBLIC_URL"
+echo "  Domain:             $DOMAIN  (IP=$IS_IP, HTTPS=$IS_HTTPS)"
+echo "  Admin email:        $ADMIN_EMAIL"
+echo "  MongoDB:            $MONGO_URL ($DB_NAME)"
+echo "  Stripe mode:        $STRIPE_MODE_DEFAULT  (hard-coded)"
+echo "  Emergent LLM key:   ✓ pre-configured"
 echo
 read -r -p "Proceed? [y/N] " yn; [[ "${yn,,}" == "y" ]] || err "Aborted."
 
 # ---------- system deps ----------
 log "Installing system packages (this may take a few minutes)..."
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -y >/dev/null
-apt-get install -y curl wget gnupg2 ca-certificates lsb-release software-properties-common \
-                   git build-essential nginx ufw openssl python3.11 python3.11-venv python3-pip >/dev/null
+apt-get update -y
+apt-get install -y --no-install-recommends \
+    curl wget gnupg2 ca-certificates lsb-release software-properties-common \
+    git build-essential nginx ufw openssl rsync \
+    python3 python3-venv python3-pip python3-dev \
+    certbot python3-certbot-nginx >/dev/null
+ok "Base packages installed."
+
+PY_BIN="$(command -v python3)"
+PY_VER="$($PY_BIN -V 2>&1 | awk '{print $2}')"
+log "Python at $PY_BIN ($PY_VER)"
 
 # Node 20
-if ! command -v node >/dev/null || [[ "$(node -v 2>/dev/null | cut -c2-3)" -lt 18 ]]; then
+NODE_MAJOR=$(node -v 2>/dev/null | sed 's/^v//' | cut -d. -f1 || echo 0)
+if [[ -z "$NODE_MAJOR" || "$NODE_MAJOR" -lt 18 ]]; then
   log "Installing Node.js 20..."
   curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null
   apt-get install -y nodejs >/dev/null
 fi
+ok "Node $(node -v) installed."
 
 # Yarn
 command -v yarn >/dev/null || npm install -g yarn >/dev/null
+ok "Yarn $(yarn -v) installed."
 
-# MongoDB 7 (only if MONGO_URL points to localhost)
+# MongoDB 7 if MONGO_URL points to localhost
 if [[ "$MONGO_URL" == *localhost* || "$MONGO_URL" == *127.0.0.1* ]]; then
   if ! command -v mongod >/dev/null; then
     log "Installing MongoDB 7..."
-    curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | gpg --dearmor -o /usr/share/keyrings/mongodb-7.gpg
-    UBU=$(lsb_release -cs); [[ "$UBU" == "noble" ]] && UBU=jammy
-    echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-7.gpg] https://repo.mongodb.org/apt/ubuntu $UBU/mongodb-org/7.0 multiverse" \
-      > /etc/apt/sources.list.d/mongodb-org-7.0.list
+    curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc \
+       | gpg --dearmor -o /usr/share/keyrings/mongodb-7.gpg
+    UBU_CODENAME=$(lsb_release -cs)
+    # MongoDB 7 official repo only ships up to jammy; map noble→jammy
+    case "$UBU_CODENAME" in
+      noble|oracular) MONGO_CODENAME=jammy ;;
+      *)              MONGO_CODENAME="$UBU_CODENAME" ;;
+    esac
+    echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-7.gpg] https://repo.mongodb.org/apt/ubuntu $MONGO_CODENAME/mongodb-org/7.0 multiverse" \
+        > /etc/apt/sources.list.d/mongodb-org-7.0.list
     apt-get update -y >/dev/null
     apt-get install -y mongodb-org >/dev/null
     systemctl enable --now mongod
   fi
+  ok "MongoDB ready."
 fi
-ok "System dependencies ready."
 
 # ---------- code ----------
 if [[ -n "$REPO_URL" ]]; then
@@ -123,13 +160,13 @@ cat > "$INSTALL_DIR/backend/.env" <<EOF
 MONGO_URL="$MONGO_URL"
 DB_NAME="$DB_NAME"
 CORS_ORIGINS="$CORS_ORIGINS"
-EMERGENT_LLM_KEY=$EMERGENT_LLM_KEY
+EMERGENT_LLM_KEY=$EMERGENT_LLM_KEY_DEFAULT
 JWT_SECRET=$JWT_SECRET
 JWT_ALGORITHM=HS256
 JWT_EXPIRE_HOURS=168
 STRIPE_API_KEY=${STRIPE_API_KEY:-sk_test_emergent}
 STRIPE_PUBLISHABLE_KEY=$STRIPE_PUBLISHABLE_KEY
-STRIPE_MODE=$STRIPE_MODE
+STRIPE_MODE=$STRIPE_MODE_DEFAULT
 ADMIN_EMAIL=$ADMIN_EMAIL
 ADMIN_PASSWORD=$ADMIN_PASSWORD
 ADMIN_NAME=$ADMIN_NAME
@@ -143,20 +180,20 @@ EOF
 ok "Env files written."
 
 # ---------- backend deps ----------
-log "Installing Python dependencies..."
-python3.11 -m venv "$INSTALL_DIR/backend/venv"
-"$INSTALL_DIR/backend/venv/bin/pip" install --upgrade pip >/dev/null
-"$INSTALL_DIR/backend/venv/bin/pip" install -r "$INSTALL_DIR/backend/requirements.txt" >/dev/null
+log "Creating Python venv + installing backend deps..."
+"$PY_BIN" -m venv "$INSTALL_DIR/backend/venv"
+"$INSTALL_DIR/backend/venv/bin/pip" install --upgrade pip wheel setuptools >/dev/null
+"$INSTALL_DIR/backend/venv/bin/pip" install -r "$INSTALL_DIR/backend/requirements.txt"
 "$INSTALL_DIR/backend/venv/bin/pip" install emergentintegrations \
-   --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/ >/dev/null
+   --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/
 ok "Backend deps installed."
 
 # ---------- frontend build ----------
-log "Installing frontend deps + building production bundle (this can take a few minutes)..."
-( cd "$INSTALL_DIR/frontend" && yarn install --silent && yarn build )
+log "Installing frontend deps + production build (this can take a few minutes)..."
+( cd "$INSTALL_DIR/frontend" && yarn install && CI=false yarn build )
 ok "Frontend built at $INSTALL_DIR/frontend/build"
 
-# ---------- systemd unit for backend ----------
+# ---------- systemd backend ----------
 log "Creating systemd service emergent-backend..."
 cat > /etc/systemd/system/emergent-backend.service <<EOF
 [Unit]
@@ -181,18 +218,16 @@ ok "emergent-backend service started."
 
 # ---------- nginx vhost ----------
 log "Configuring nginx reverse proxy..."
-DOMAIN=$(echo "$PUBLIC_URL" | sed -E 's#https?://##' | cut -d/ -f1)
 cat > /etc/nginx/sites-available/emergent-clone <<EOF
 server {
     listen 80;
+    listen [::]:80;
     server_name $DOMAIN;
     client_max_body_size 25M;
 
-    # Frontend static build
     root $INSTALL_DIR/frontend/build;
     index index.html;
 
-    # API + webhook -> backend
     location ~ ^/api/ {
         proxy_pass http://127.0.0.1:8001;
         proxy_set_header Host \$host;
@@ -202,7 +237,6 @@ server {
         proxy_read_timeout 600s;
     }
 
-    # SPA fallback
     location / { try_files \$uri /index.html; }
 }
 EOF
@@ -213,14 +247,27 @@ systemctl reload nginx
 ok "nginx vhost configured for $DOMAIN"
 
 # ---------- firewall ----------
-if command -v ufw >/dev/null; then
+if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
   ufw allow OpenSSH >/dev/null 2>&1 || true
   ufw allow 'Nginx Full' >/dev/null 2>&1 || true
 fi
 
-# ---------- wait for backend to bootstrap admin ----------
+# ---------- certbot (TLS) ----------
+if [[ "$IS_HTTPS" == "1" && "$IS_IP" == "0" ]]; then
+  log "Requesting Let's Encrypt certificate for $DOMAIN..."
+  if certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos -m "$ADMIN_EMAIL" --redirect; then
+    ok "TLS certificate installed for $DOMAIN."
+  else
+    warn "Certbot failed (DNS may not point here yet). You can re-run later:"
+    warn "    sudo certbot --nginx -d $DOMAIN -m $ADMIN_EMAIL --agree-tos"
+  fi
+elif [[ "$IS_HTTPS" == "1" && "$IS_IP" == "1" ]]; then
+  warn "Public URL is https:// with an IP address — Let's Encrypt requires a real domain. Skipping certbot."
+fi
+
+# ---------- wait for backend ----------
 log "Waiting for backend to bootstrap admin account..."
-for i in {1..20}; do
+for _ in {1..25}; do
   if curl -fsS http://127.0.0.1:8001/api/ >/dev/null 2>&1; then break; fi
   sleep 1
 done
@@ -233,18 +280,16 @@ ${GREEN} Emergent Clone is installed.${NC}
 ${GREEN}-------------------------------------------------------------${NC}
 
   Open:        $PUBLIC_URL
-  Admin login: $ADMIN_EMAIL  (the password you just set)
+  Admin login: $ADMIN_EMAIL   (the password you just set)
 
-  • The admin account is ALSO a normal user — sign in with it and
-    you can build apps in the same workspace.
-  • Configure / change Stripe keys + packages in the in-app
-    Admin panel (top-left menu when logged in as admin).
-  • To enable HTTPS, point your DNS A-record at this server and run:
-        sudo apt install -y certbot python3-certbot-nginx
-        sudo certbot --nginx -d $DOMAIN
-  • Logs:
-        journalctl -u emergent-backend -f
-        tail -f /var/log/nginx/error.log
+  • The admin account is ALSO a normal user — sign in and build apps.
+  • Stripe mode is set to "live"; add your real keys in Admin → Settings.
+  • Logs:    journalctl -u emergent-backend -f
+             tail -f /var/log/nginx/error.log
+  • Update:  cd $INSTALL_DIR && git pull
+             $INSTALL_DIR/backend/venv/bin/pip install -r backend/requirements.txt
+             ( cd frontend && yarn install && CI=false yarn build )
+             systemctl restart emergent-backend && systemctl reload nginx
 
 Have fun building!
 EOF

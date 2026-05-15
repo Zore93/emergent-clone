@@ -45,12 +45,19 @@ The installer asks for, in order:
 | Admin password | *(hidden)* | Min 6 chars |
 | MongoDB URL | `mongodb://localhost:27017` | If you keep `localhost`, MongoDB 7 is auto-installed |
 | MongoDB DB name | `emergent_clone` | Created on first run |
-| Emergent LLM key | `sk-emergent-...` | Required for the AI builder |
-| Stripe secret key | `sk_test_...` | **Optional** — settable later in the Admin panel |
-| Stripe publishable key | `pk_test_...` | Same — optional now |
-| Stripe mode | `test` or `live` | |
+| Stripe secret key | `sk_live_...` | **Optional** — settable later in the Admin panel |
+| Stripe publishable key | `pk_live_...` | Same — optional now |
 | JWT secret | *(blank)* | Blank = auto-generates 32-byte random hex |
 | CORS origins | `https://app.example.com,*` | |
+
+> **Auto-configured (no prompt):** the Emergent LLM key is bundled into the
+> installer, and Stripe mode is set to `live`. You can change both later in
+> `backend/.env` if needed.
+
+> **Auto TLS:** if your Public URL starts with `https://` and points to a real
+> domain (not an IP), the installer will run `certbot --nginx` for you and
+> obtain a Let's Encrypt certificate. Make sure your DNS A-record points to
+> the VPS *before* running the script.
 
 It will then:
 
