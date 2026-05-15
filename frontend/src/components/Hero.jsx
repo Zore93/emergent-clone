@@ -45,13 +45,13 @@ export default function Hero({ onContinue }) {
           </button>
 
           <div className="mt-4 flex items-center gap-3">
-            <button className="h-11 w-11 rounded-full bg-neutral-100 hover:bg-neutral-200 flex items-center justify-center text-neutral-800 transition-colors" aria-label="GitHub">
+            <button onClick={onContinue} className="h-11 w-11 rounded-full bg-neutral-100 hover:bg-neutral-200 flex items-center justify-center text-neutral-800 transition-colors" aria-label="GitHub">
               <Github className="w-5 h-5" />
             </button>
-            <button className="h-11 w-11 rounded-full bg-neutral-100 hover:bg-neutral-200 flex items-center justify-center text-neutral-800 transition-colors" aria-label="Apple">
+            <button onClick={onContinue} className="h-11 w-11 rounded-full bg-neutral-100 hover:bg-neutral-200 flex items-center justify-center text-neutral-800 transition-colors" aria-label="Apple">
               <Apple className="w-5 h-5" />
             </button>
-            <button className="h-11 w-11 rounded-full bg-neutral-100 hover:bg-neutral-200 flex items-center justify-center text-neutral-800 transition-colors" aria-label="Facebook">
+            <button onClick={onContinue} className="h-11 w-11 rounded-full bg-neutral-100 hover:bg-neutral-200 flex items-center justify-center text-neutral-800 transition-colors" aria-label="Facebook">
               <Facebook className="w-5 h-5" />
             </button>
           </div>

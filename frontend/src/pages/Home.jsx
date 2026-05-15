@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React from 'react';
+import { useNavigate } from 'react-router-dom';
 import Navbar from '../components/Navbar';
 import Hero from '../components/Hero';
 import Stats from '../components/Stats';
@@ -8,11 +9,12 @@ import Features from '../components/Features';
 import Pricing from '../components/Pricing';
 import FAQ from '../components/FAQ';
 import Footer from '../components/Footer';
-import AuthDialog from '../components/AuthDialog';
+import { useAuth } from '../lib/auth';
 
 export default function Home() {
-  const [authOpen, setAuthOpen] = useState(false);
-  const open = () => setAuthOpen(true);
+  const nav = useNavigate();
+  const { user } = useAuth();
+  const open = () => nav(user ? '/dashboard' : '/signup');
 
   return (
     <div className="min-h-screen bg-white text-neutral-900">
@@ -25,7 +27,6 @@ export default function Home() {
       <Pricing />
       <FAQ />
       <Footer onGetStarted={open} />
-      <AuthDialog open={authOpen} onOpenChange={setAuthOpen} />
     </div>
   );
 }
