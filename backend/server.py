@@ -174,12 +174,17 @@ async def chat_in_project(pid: str, req: ChatRequest, user=Depends(get_current_u
     history = p.get('messages', [])
     history.append(user_msg.model_dump())
 
-    result = await generate_app(
-        session_id=pid,
-        history=[{'role': m['role'], 'content': m['content']} for m in history],
-        user_message=req.message,
-    )
-    assistant_msg = ChatMessage(role='assistant', content=result['reply'])
+    try:
+        result = await generate_app(
+            session_id=pid,
+            history=[{'role': m['role'], 'content': m['content']} for m in history],
+            user_message=req.message,
+        )
+    except Exception as e:
+        logger.exception(f'Unhandled error during AI generation for project {pid}')
+        raise HTTPException(status_code=500, detail=f'AI generation failed: {e}')
+
+    assistant_msg = ChatMessage(role='assistant', content=result.get('reply', 'Here you go.'))
     history.append(assistant_msg.model_dump())
 
     # Decrement 1 credit
@@ -187,7 +192,7 @@ async def chat_in_project(pid: str, req: ChatRequest, user=Depends(get_current_u
 
     set_fields = {
         'messages': history,
-        'files': result['files'],
+        'files': result.get('files', p.get('files', [])),
         'updated_at': now_utc(),
     }
     # On first generation, also update name/description from model if user kept defaults

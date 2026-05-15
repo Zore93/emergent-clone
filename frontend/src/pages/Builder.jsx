@@ -45,10 +45,15 @@ export default function Builder() {
     if (!input.trim() || sending) return;
     setSending(true); setErr('');
     try {
-      const r = await apiClient.post(`/projects/${project.id}/chat`, { message: input });
+      const r = await apiClient.post(`/projects/${project.id}/chat`, { message: input }, { timeout: 180000 });
       setProject(r.data); setInput(''); refresh();
     } catch (ex) {
-      setErr(ex?.response?.data?.detail || 'Failed to send');
+      const detail = ex?.response?.data?.detail;
+      const status = ex?.response?.status;
+      if (detail) setErr(`Error ${status || ''}: ${detail}`);
+      else if (ex?.code === 'ECONNABORTED') setErr('Request timed out — try again or use a shorter prompt.');
+      else if (ex?.message) setErr(`Network: ${ex.message}`);
+      else setErr('Failed to send');
     } finally {
       setSending(false);
     }

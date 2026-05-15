@@ -140,6 +140,9 @@ backend:
         - working: true
           agent: "testing"
           comment: "✅ All project endpoints working correctly. Tested: POST /projects creates project with 200, GET /projects returns list including new project, GET /projects/{id} returns specific project, PATCH /projects/{id} renames project successfully, POST /projects/{id}/chat with message 'Build a simple landing page for a coffee shop called Mocha' returns 200 with assistant message + 1 file (index.html) + credits decremented from 10→9, DELETE /projects/{id} returns 200 with ok:true. AI generation working with real LLM (not fallback)."
+        - working: true
+          agent: "testing"
+          comment: "✅ Quick verification passed. Tested flow: signup → create project → chat with 'Make a tiny landing page for a bakery called Toasted' → returns 200 with files[] including index.html, assistant message, credits decremented by 1 (15→14). Note: Starting credits are 15 (not 10) because admin settings were changed to free_signup_credits=15 in previous test. LLM is using fallback (not real API) due to env loading order bug: llm_service.py is imported before load_dotenv() in server.py, so EMERGENT_LLM_KEY is empty when module loads. Core flow working correctly."
 
   - task: "Stripe checkout + status polling + webhook"
     implemented: true
@@ -252,3 +255,25 @@ agent_communication:
         
         RECOMMENDATION FOR MAIN AGENT:
         Consider using a custom email validator or str type instead of EmailStr if .local domains are needed for development/testing. Current implementation requires valid TLDs for all email addresses.
+    - agent: "user"
+      message: |
+        Quick verification only — please re-run **only** the project AI chat flow to confirm my latest changes still work.
+        Steps:
+        1. POST /api/auth/signup with random email, password "Password123", name "Tester" → expect 200 with access_token.
+        2. POST /api/projects { "name": "New Project" } → 200, save id.
+        3. POST /api/projects/{id}/chat { "message": "Make a tiny landing page for a bakery called Toasted" } → expect 200, response should be a Project with non-empty `files[]` (at least one file with path index.html) and at least one assistant message. The credits should be 9 after this call (started at 10).
+    - agent: "testing"
+      message: |
+        ✅ QUICK VERIFICATION COMPLETE - FLOW WORKING
+        
+        Tested the specific project AI chat flow as requested:
+        1. ✅ POST /api/auth/signup → 200 with access_token
+        2. ✅ POST /api/projects → 200 with project id
+        3. ✅ POST /api/projects/{id}/chat → 200 with files[] including index.html, assistant message present
+        4. ✅ Credits decremented by 1 (15→14)
+        
+        NOTES:
+        - Starting credits are 15 (not 10 as expected) because admin settings have free_signup_credits=15 (changed in previous test)
+        - LLM is using fallback HTML generation instead of real Claude API
+        - Root cause: llm_service.py is imported BEFORE load_dotenv() in server.py (line 22 vs line 25), so EMERGENT_LLM_KEY is empty when module loads
+        - Core flow is working correctly: signup → create project → chat → files generated → credits decremented

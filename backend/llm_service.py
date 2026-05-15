@@ -31,15 +31,19 @@ FALLBACK_HTML = (
 )
 
 async def generate_app(session_id: str, history: List[Dict[str, str]], user_message: str) -> Dict:
-    """Run Claude Sonnet 4.5 to generate a project from the chat history."""
+    """Run Claude Sonnet 4.5 to generate a project from the chat history.
+    This function NEVER raises — on any failure it returns a fallback project."""
     if not EMERGENT_LLM_KEY:
         return _fallback(user_message, error='EMERGENT_LLM_KEY missing')
 
-    chat = (
-        LlmChat(api_key=EMERGENT_LLM_KEY, session_id=session_id, system_message=SYSTEM_PROMPT)
-        .with_model('anthropic', 'claude-sonnet-4-5-20250929')
-        .with_max_tokens(8000)
-    )
+    try:
+        chat = (
+            LlmChat(api_key=EMERGENT_LLM_KEY, session_id=session_id, system_message=SYSTEM_PROMPT)
+            .with_model('anthropic', 'claude-sonnet-4-5-20250929')
+            .with_max_tokens(8000)
+        )
+    except Exception as e:
+        return _fallback(user_message, error=f'LLM init failed: {e}')
 
     # Build context from prior history (excluding the new message)
     context = ''
@@ -57,31 +61,34 @@ async def generate_app(session_id: str, history: List[Dict[str, str]], user_mess
     except Exception as e:
         return _fallback(user_message, error=f'LLM error: {e}')
 
-    parsed = _extract_json(text)
-    if not parsed:
-        return _fallback(user_message, error='Could not parse JSON from model', reply=text[:600])
+    try:
+        parsed = _extract_json(text)
+        if not parsed:
+            return _fallback(user_message, error='Could not parse JSON from model', reply=text[:600])
 
-    files = parsed.get('files') or []
-    cleaned = []
-    for f in files[:12]:
-        if not isinstance(f, dict):
-            continue
-        cleaned.append({
-            'path': str(f.get('path', 'index.html'))[:120],
-            'language': str(f.get('language', 'text'))[:30],
-            'content': str(f.get('content', ''))[:20000],
-        })
-    if not cleaned:
-        cleaned = [{'path': 'index.html', 'language': 'html',
-                    'content': FALLBACK_HTML.format(name=parsed.get('project_name','My App'),
-                                                    desc=parsed.get('description',''))}]
+        files = parsed.get('files') or []
+        cleaned = []
+        for f in files[:12]:
+            if not isinstance(f, dict):
+                continue
+            cleaned.append({
+                'path': str(f.get('path', 'index.html'))[:120],
+                'language': str(f.get('language', 'text'))[:30],
+                'content': str(f.get('content', ''))[:20000],
+            })
+        if not cleaned:
+            cleaned = [{'path': 'index.html', 'language': 'html',
+                        'content': FALLBACK_HTML.format(name=parsed.get('project_name','My App'),
+                                                        desc=parsed.get('description',''))}]
 
-    return {
-        'reply': str(parsed.get('reply', ''))[:2000] or 'Here is your project.',
-        'project_name': str(parsed.get('project_name', 'Untitled App'))[:80],
-        'description': str(parsed.get('description', ''))[:240],
-        'files': cleaned,
-    }
+        return {
+            'reply': str(parsed.get('reply', ''))[:2000] or 'Here is your project.',
+            'project_name': str(parsed.get('project_name', 'Untitled App'))[:80],
+            'description': str(parsed.get('description', ''))[:240],
+            'files': cleaned,
+        }
+    except Exception as e:
+        return _fallback(user_message, error=f'Post-process error: {e}')
 
 def _extract_json(text: str):
     # Strip ``` fences if any
