@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import asyncio
 from typing import List, Dict
 from emergentintegrations.llm.chat import LlmChat, UserMessage
 
@@ -56,9 +57,27 @@ async def generate_app(session_id: str, history: List[Dict[str, str]], user_mess
     )
 
     try:
-        raw = await chat.send_message(UserMessage(text=prompt))
+        raw = None
+        last_err = None
+        # Retry transient upstream errors (502 / 503 / 504 / timeouts) with backoff.
+        for attempt in range(3):
+            try:
+                raw = await chat.send_message(UserMessage(text=prompt))
+                last_err = None
+                break
+            except Exception as ex:
+                emsg = str(ex)
+                last_err = ex
+                transient = any(code in emsg for code in ('502', '503', '504', 'BadGateway', 'ServiceUnavailable', 'GatewayTimeout', 'overloaded'))
+                if not transient or attempt == 2:
+                    raise
+                await asyncio.sleep(2 * (attempt + 1))
         text = raw.strip() if isinstance(raw, str) else str(raw)
     except Exception as e:
+        # Detect upstream gateway issues vs other LLM errors so we can give a clearer message.
+        emsg = str(e)
+        if any(code in emsg for code in ('502', '503', '504', 'BadGateway', 'ServiceUnavailable', 'GatewayTimeout', 'overloaded')):
+            return _fallback(user_message, error='The AI service is temporarily unavailable (upstream 5xx). Please retry in a few seconds.')
         return _fallback(user_message, error=f'LLM error: {e}')
 
     try:
