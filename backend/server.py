@@ -414,8 +414,14 @@ async def on_startup():
                 'created_at': now_utc(),
             })
             logger.info(f'Bootstrapped admin user: {admin_email}')
-        elif existing.get('role') != 'admin':
-            await db.users.update_one({'id': existing['id']}, {'$set': {'role': 'admin'}})
+        else:
+            # Re-sync admin role + password from env each boot so changing
+            # .env + restarting the service is enough to reset access.
+            update = {'role': 'admin'}
+            if not verify_password(admin_password, existing.get('password_hash', '')):
+                update['password_hash'] = hash_password(admin_password)
+                logger.info(f'Re-synced admin password for {admin_email}')
+            await db.users.update_one({'id': existing['id']}, {'$set': update})
     # Seed default packages if empty
     if await db.packages.count_documents({}) == 0:
         defaults = [

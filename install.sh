@@ -44,6 +44,13 @@ ask_secret() {
 
 [[ $EUID -eq 0 ]] || err "Run with sudo / as root."
 
+# Safe writer for KEY=value lines in .env (single-quote escaped so $, ", `, ! etc. survive)
+write_env() {
+  local file="$1" key="$2" val="${3-}"
+  local esc="${val//\'/\'\\\'\'}"
+  printf "%s='%s'\n" "$key" "$esc" >> "$file"
+}
+
 # ---------- inputs ----------
 echo
 log "Welcome to the Emergent Clone installer."
@@ -156,28 +163,27 @@ ok "Code is at $INSTALL_DIR"
 
 # ---------- env files ----------
 log "Writing backend/.env"
-cat > "$INSTALL_DIR/backend/.env" <<EOF
-MONGO_URL="$MONGO_URL"
-DB_NAME="$DB_NAME"
-CORS_ORIGINS="$CORS_ORIGINS"
-EMERGENT_LLM_KEY=$EMERGENT_LLM_KEY_DEFAULT
-JWT_SECRET=$JWT_SECRET
-JWT_ALGORITHM=HS256
-JWT_EXPIRE_HOURS=168
-STRIPE_API_KEY=${STRIPE_API_KEY:-sk_test_emergent}
-STRIPE_PUBLISHABLE_KEY=$STRIPE_PUBLISHABLE_KEY
-STRIPE_MODE=$STRIPE_MODE_DEFAULT
-ADMIN_EMAIL=$ADMIN_EMAIL
-ADMIN_PASSWORD=$ADMIN_PASSWORD
-ADMIN_NAME=$ADMIN_NAME
-EOF
+: > "$INSTALL_DIR/backend/.env"
+write_env "$INSTALL_DIR/backend/.env" MONGO_URL                "$MONGO_URL"
+write_env "$INSTALL_DIR/backend/.env" DB_NAME                  "$DB_NAME"
+write_env "$INSTALL_DIR/backend/.env" CORS_ORIGINS             "$CORS_ORIGINS"
+write_env "$INSTALL_DIR/backend/.env" EMERGENT_LLM_KEY         "$EMERGENT_LLM_KEY_DEFAULT"
+write_env "$INSTALL_DIR/backend/.env" JWT_SECRET               "$JWT_SECRET"
+write_env "$INSTALL_DIR/backend/.env" JWT_ALGORITHM            "HS256"
+write_env "$INSTALL_DIR/backend/.env" JWT_EXPIRE_HOURS         "168"
+write_env "$INSTALL_DIR/backend/.env" STRIPE_API_KEY           "${STRIPE_API_KEY:-sk_test_emergent}"
+write_env "$INSTALL_DIR/backend/.env" STRIPE_PUBLISHABLE_KEY   "$STRIPE_PUBLISHABLE_KEY"
+write_env "$INSTALL_DIR/backend/.env" STRIPE_MODE              "$STRIPE_MODE_DEFAULT"
+write_env "$INSTALL_DIR/backend/.env" ADMIN_EMAIL              "$ADMIN_EMAIL"
+write_env "$INSTALL_DIR/backend/.env" ADMIN_PASSWORD           "$ADMIN_PASSWORD"
+write_env "$INSTALL_DIR/backend/.env" ADMIN_NAME               "$ADMIN_NAME"
+chmod 600 "$INSTALL_DIR/backend/.env"
 
 log "Writing frontend/.env"
-cat > "$INSTALL_DIR/frontend/.env" <<EOF
-REACT_APP_BACKEND_URL=$PUBLIC_URL
-WDS_SOCKET_PORT=443
-EOF
-ok "Env files written."
+: > "$INSTALL_DIR/frontend/.env"
+write_env "$INSTALL_DIR/frontend/.env" REACT_APP_BACKEND_URL   "$PUBLIC_URL"
+write_env "$INSTALL_DIR/frontend/.env" WDS_SOCKET_PORT         "443"
+ok "Env files written (special characters in your password are preserved)."
 
 # ---------- backend deps ----------
 log "Creating Python venv + installing backend deps..."
@@ -194,7 +200,10 @@ ok "Backend deps installed."
 
 # ---------- frontend build ----------
 log "Installing frontend deps + production build (this can take a few minutes)..."
-( cd "$INSTALL_DIR/frontend" && yarn install && CI=false yarn build )
+# --silent and DISABLE_ESLINT_PLUGIN hide the deprecation noise from CRA's transitive deps; warnings are informational and do not affect the build.
+( cd "$INSTALL_DIR/frontend" \
+  && yarn install --silent --no-progress 2>/dev/null \
+  && CI=false DISABLE_ESLINT_PLUGIN=true yarn build --silent 2>/dev/null )
 ok "Frontend built at $INSTALL_DIR/frontend/build"
 
 # ---------- systemd backend ----------
@@ -276,6 +285,23 @@ for _ in {1..25}; do
   sleep 1
 done
 ok "Backend is live."
+
+# ---------- verify admin login ----------
+log "Verifying admin login..."
+LOGIN_BODY=$(python3 -c 'import json,sys; print(json.dumps({"email": sys.argv[1], "password": sys.argv[2]}))' "$ADMIN_EMAIL" "$ADMIN_PASSWORD")
+HTTP_CODE=$(curl -sS -o /tmp/login.json -w "%{http_code}" \
+   -H "Content-Type: application/json" \
+   -X POST http://127.0.0.1:8001/api/auth/login \
+   --data-raw "$LOGIN_BODY" || echo "000")
+if [[ "$HTTP_CODE" == "200" ]]; then
+  ok "Admin login works ✓"
+else
+  warn "Admin login test returned HTTP $HTTP_CODE."
+  warn "Response: $(cat /tmp/login.json 2>/dev/null)"
+  warn "You can fix it manually by editing $INSTALL_DIR/backend/.env (ADMIN_PASSWORD=…) and running:"
+  warn "    sudo systemctl restart emergent-backend"
+fi
+rm -f /tmp/login.json
 
 cat <<EOF
 
