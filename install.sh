@@ -183,7 +183,11 @@ ok "Env files written."
 log "Creating Python venv + installing backend deps..."
 "$PY_BIN" -m venv "$INSTALL_DIR/backend/venv"
 "$INSTALL_DIR/backend/venv/bin/pip" install --upgrade pip wheel setuptools >/dev/null
-"$INSTALL_DIR/backend/venv/bin/pip" install -r "$INSTALL_DIR/backend/requirements.txt"
+# requirements.txt pins emergentintegrations which lives on a private index — pass it here too.
+"$INSTALL_DIR/backend/venv/bin/pip" install \
+   --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/ \
+   -r "$INSTALL_DIR/backend/requirements.txt"
+# Belt & braces: ensure emergentintegrations is present (in case requirements.txt is regenerated without it).
 "$INSTALL_DIR/backend/venv/bin/pip" install emergentintegrations \
    --extra-index-url https://d33sy5i8bnduwe.cloudfront.net/simple/
 ok "Backend deps installed."
