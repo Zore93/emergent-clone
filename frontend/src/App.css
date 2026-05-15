@@ -1,0 +1,13 @@
+/* Reset CRA defaults so layout flows normally */
+.App {
+  text-align: left;
+}
+
+/* Subtle text selection */
+::selection {
+  background: #0a0a0a;
+  color: #fff;
+}
+
+/* Smooth anchor scroll */
+html { scroll-behavior: smooth; }
