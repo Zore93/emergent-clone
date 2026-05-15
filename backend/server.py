@@ -8,6 +8,10 @@ import logging
 from pathlib import Path
 from typing import List, Optional
 
+# Load env FIRST so any later imports that read os.environ at module level see the values.
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
+
 from models import (
     SignupRequest, LoginRequest, TokenResponse, UserPublic,
     ProjectCreateRequest, ProjectRenameRequest, ChatRequest, Project, ChatMessage,
@@ -20,9 +24,6 @@ from auth_utils import (
     bearer_scheme, user_record_to_public,
 )
 from llm_service import generate_app
-
-ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
 
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)

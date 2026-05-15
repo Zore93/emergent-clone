@@ -4,8 +4,6 @@ import re
 from typing import List, Dict
 from emergentintegrations.llm.chat import LlmChat, UserMessage
 
-EMERGENT_LLM_KEY = os.environ.get('EMERGENT_LLM_KEY', '')
-
 SYSTEM_PROMPT = (
     "You are an expert AI app-builder copilot for the Emergent platform. "
     "Given a user's request, design and produce a complete, runnable, full-stack web app or website. "
@@ -33,14 +31,16 @@ FALLBACK_HTML = (
 async def generate_app(session_id: str, history: List[Dict[str, str]], user_message: str) -> Dict:
     """Run Claude Sonnet 4.5 to generate a project from the chat history.
     This function NEVER raises — on any failure it returns a fallback project."""
-    if not EMERGENT_LLM_KEY:
+    # Read key at CALL time so it picks up values loaded via load_dotenv() after import.
+    api_key = os.environ.get('EMERGENT_LLM_KEY', '').strip()
+    if not api_key:
         return _fallback(user_message, error='EMERGENT_LLM_KEY missing')
 
     try:
         chat = (
-            LlmChat(api_key=EMERGENT_LLM_KEY, session_id=session_id, system_message=SYSTEM_PROMPT)
+            LlmChat(api_key=api_key, session_id=session_id, system_message=SYSTEM_PROMPT)
             .with_model('anthropic', 'claude-sonnet-4-5-20250929')
-            .with_max_tokens(8000)
+            .with_params(max_tokens=8000)
         )
     except Exception as e:
         return _fallback(user_message, error=f'LLM init failed: {e}')
